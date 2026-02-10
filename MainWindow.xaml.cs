@@ -1,28 +1,30 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
-using System.Net.Http;
+using System.Net;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using DiscordRPC;
-using System.IO;
+using System.Management;
 
 namespace MyDarkApp
 {
     public partial class MainWindow : Window
     {
-        private string CurrentVersion = "1.0.0";
-        private string VersionUrl = "https://raw.githubusercontent.com/ТВОЙ_НИК/РЕПО/main/version.txt";
-        private string ExeDownloadUrl = "https://github.com/ТВОЙ_НИК/РЕПО/releases/latest/download/idk.exe";
-
+        // ВАЖНО: Укажи здесь текущую версию. 
+        // Если на GitHub в version.txt будет 1.0.1, а тут 1.0.0 — сработает обновление.
+        private string CurrentVersion = "1.0.1"; 
+        
         private List<Process> _allProcesses = new List<Process>();
-        private DiscordRpcClient? client;
-        private PerformanceCounter? cpuCounter;
-        private PerformanceCounter? ramCounter;
+        private PerformanceCounter cpuCounter;
+        private PerformanceCounter ramCounter;
+        private float totalRamMBytes = 0;
+        private DiscordRpcClient client;
 
         public MainWindow()
         {
@@ -33,15 +35,19 @@ namespace MyDarkApp
 
         private async void LoadApplication()
         {
-            var sb = (System.Windows.Media.Animation.Storyboard)this.Resources["FadeIn"];
-            sb.Begin(MainBorder);
+            // Анимация появления
+            var fadeIn = (System.Windows.Media.Animation.Storyboard)Resources["FadeIn"];
+            fadeIn.Begin(MainBorder);
 
+            // 1. Проверка обновлений
             StatusText.Text = "Проверка обновлений...";
-            await CheckUpdatesSilent();
+            await CheckForUpdates();
 
+            // 2. Инициализация Discord
             StatusText.Text = "Подключение к Discord...";
             InitializeDiscord();
 
+            // 3. Загрузка процессов
             StatusText.Text = "Сбор данных о процессах...";
             RefreshProcessList();
 
@@ -49,44 +55,71 @@ namespace MyDarkApp
             LoadingGrid.Visibility = Visibility.Collapsed;
         }
 
-        private async Task CheckUpdatesSilent()
+        private async Task CheckForUpdates()
         {
-            try {
-                using (HttpClient web = new HttpClient()) {
-                    web.Timeout = TimeSpan.FromSeconds(5);
-                    string latestVersion = (await web.GetStringAsync(VersionUrl)).Trim();
+            try
+            {
+                using (WebClient wc = new WebClient())
+                {
+                    // Ссылка на твой файл с версией на GitHub
+                    string latestVersion = await wc.DownloadStringTaskAsync("https://raw.githubusercontent.com/Stas091523/system-helper/main/version.txt");
+                    latestVersion = latestVersion.Trim();
 
-                    if (latestVersion != CurrentVersion) {
-                        var res = MessageBox.Show($"Найдено обновление {latestVersion}. Установить сейчас?", "Update", MessageBoxButton.YesNo, MessageBoxImage.Information);
-                        if (res == MessageBoxResult.Yes) {
-                            StatusText.Text = "Загрузка новой версии...";
-                            byte[] data = await web.GetByteArrayAsync(ExeDownloadUrl);
-                            
-                            var currentProcess = Process.GetCurrentProcess();
-                            string? currentExe = currentProcess.MainModule?.FileName;
-                            
-                            if (string.IsNullOrEmpty(currentExe)) return;
-
-                            string updateExe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "update_new.exe");
-                            
-                            File.WriteAllBytes(updateExe, data); // ИСПРАВЛЕНО: было updatePath
-                            
-                            string fileName = Path.GetFileName(currentExe);
-                            string batPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "updater.bat");
-                            string batContent = $@"
-@echo off
-timeout /t 2 /nobreak > nul
-del ""{currentExe}""
-ren ""{updateExe}"" ""{fileName}""
-start """" ""{currentExe}""
-del ""%~f0""";
-                            File.WriteAllText(batPath, batContent);
-                            Process.Start(new ProcessStartInfo(batPath) { CreateNoWindow = true, UseShellExecute = true });
-                            Application.Current.Shutdown();
+                    if (latestVersion != CurrentVersion)
+                    {
+                        var result = MessageBox.Show($"Найдено обновление {latestVersion}. Установить сейчас?", "Update", MessageBoxButton.YesNo, MessageBoxImage.Information);
+                        if (result == MessageBoxResult.Yes)
+                        {
+                            // Ссылка на прямой скачивание твоего EXE
+                            string downloadUrl = "https://github.com/Stas091523/system-helper/releases/latest/download/idk.exe";
+                            InstallUpdate(downloadUrl);
                         }
                     }
                 }
-            } catch { }
+            }
+            catch { /* Игнорируем ошибки сети */ }
+        }
+
+        private void InstallUpdate(string downloadUrl)
+        {
+            try
+            {
+                string currentPath = Process.GetCurrentProcess().MainModule.FileName;
+                string newPath = currentPath + ".new";
+                string updaterPath = Path.Combine(Path.GetDirectoryName(currentPath), "updater.bat");
+
+                using (WebClient wc = new WebClient())
+                {
+                    // Скачиваем новый файл с припиской .new
+                    wc.DownloadFile(downloadUrl, newPath);
+
+                    // Создаем батник, который подождет закрытия, удалит старый EXE и переименует новый
+                    string batContent = $@"
+@echo off
+timeout /t 2 /nobreak > nul
+del /f /q ""{currentPath}""
+move /y ""{newPath}"" ""{currentPath}""
+start """" ""{currentPath}""
+del ""%~f0""
+";
+                    File.WriteAllText(updaterPath, batContent);
+
+                    // Запускаем батник
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = updaterPath,
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    });
+
+                    // Выходим из текущей программы
+                    Application.Current.Shutdown();
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Ошибка при установке обновления: " + ex.Message);
+            }
         }
 
         private void InitCounters()
@@ -94,53 +127,69 @@ del ""%~f0""";
             try {
                 cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
                 ramCounter = new PerformanceCounter("Memory", "Available MBytes");
-            } catch { }
+
+                ManagementObjectSearcher searcher = new ManagementObjectSearcher("SELECT TotalVisibleMemorySize FROM Win32_OperatingSystem");
+                foreach (ManagementObject obj in searcher.Get()) {
+                    totalRamMBytes = float.Parse(obj["TotalVisibleMemorySize"].ToString()) / 1024;
+                }
+            } catch { totalRamMBytes = 16384; }
 
             var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             timer.Tick += (s, e) => {
-                if (cpuCounter != null) CpuBar.Value = cpuCounter.NextValue();
-                if (ramCounter != null) {
-                    float avail = ramCounter.NextValue();
-                    RamBar.Value = Math.Clamp(100 - (avail / 160), 0, 100);
-                }
+                try {
+                    CpuBar.Value = cpuCounter.NextValue();
+                    float used = totalRamMBytes - ramCounter.NextValue();
+                    RamBar.Value = (used / totalRamMBytes) * 100;
+                } catch { }
             };
             timer.Start();
         }
 
         private void InitializeDiscord()
         {
-            client = new DiscordRpcClient("1470707542165422162");
-            client.OnReady += (s, e) => Dispatcher.Invoke(() => {
-                DiscordUserText.Text = e.User.Username.ToUpper();
-                try {
+            try {
+                client = new DiscordRpcClient("1470707542165422162");
+                client.OnReady += (s, e) => Dispatcher.Invoke(() => {
+                    DiscordUserText.Text = e.User.Username.ToUpper();
                     AvatarImage.ImageSource = new BitmapImage(new Uri(e.User.GetAvatarURL(User.AvatarFormat.PNG)));
-                } catch { }
-            });
-            client.Initialize();
-            client.SetPresence(new RichPresence { Details = "Управляет процессами", State = "Версия " + CurrentVersion });
+                });
+                client.Initialize();
+                client.SetPresence(new RichPresence { Details = "System Monitoring", State = "v" + CurrentVersion });
+            } catch { }
         }
 
         private void RefreshProcessList()
         {
-            _allProcesses = Process.GetProcesses().Where(p => !string.IsNullOrEmpty(p.ProcessName)).OrderBy(p => p.ProcessName).ToList();
-            if (ProcessList != null) ProcessList.ItemsSource = _allProcesses;
+            _allProcesses = Process.GetProcesses().OrderBy(p => p.ProcessName).ToList();
+            ProcessList.ItemsSource = _allProcesses;
         }
 
-        private void SearchBox_TextChanged(object sender, TextChangedEventArgs e) {
-            if (ProcessList != null) ProcessList.ItemsSource = _allProcesses.Where(p => p.ProcessName.ToLower().Contains(SearchBox.Text.ToLower())).ToList();
-        }
+        private void SearchBox_TextChanged(object sender, TextChangedEventArgs e) =>
+            ProcessList.ItemsSource = _allProcesses.Where(p => p.ProcessName.ToLower().Contains(SearchBox.Text.ToLower())).ToList();
 
         private void Refresh_Click(object sender, RoutedEventArgs e) => RefreshProcessList();
-        private void Close_Click(object sender, RoutedEventArgs e) { client?.Dispose(); Application.Current.Shutdown(); }
-        private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
         
-        private void Kill_Click(object sender, RoutedEventArgs e) {
-            if (ProcessList.SelectedItem is Process p) {
+        private void Close_Click(object sender, RoutedEventArgs e) 
+        { 
+            client?.Dispose(); 
+            Application.Current.Shutdown(); 
+        }
+
+        private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+
+        private void Kill_Click(object sender, RoutedEventArgs e) 
+        {
+            if (ProcessList.SelectedItem is Process p) 
+            {
                 try { p.Kill(); Task.Delay(500).ContinueWith(_ => Dispatcher.Invoke(RefreshProcessList)); }
-                catch { }
+                catch (Exception ex) { MessageBox.Show(ex.Message); }
             }
         }
 
-        protected override void OnMouseLeftButtonDown(System.Windows.Input.MouseButtonEventArgs e) { base.OnMouseLeftButtonDown(e); DragMove(); }
+        protected override void OnMouseLeftButtonDown(System.Windows.Input.MouseButtonEventArgs e) 
+        { 
+            base.OnMouseLeftButtonDown(e); 
+            if (e.LeftButton == System.Windows.Input.MouseButtonState.Pressed) DragMove(); 
+        }
     }
 }
